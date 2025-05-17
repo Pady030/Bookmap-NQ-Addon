@@ -1,0 +1,97 @@
+import velox.api.layer1.annotations.*;
+import velox.api.layer1.common.Log;
+import velox.api.layer1.data.InstrumentInfo;
+import velox.api.layer1.messages.indicators.Layer1ApiUserMessageModifyIndicator.GraphType;
+import velox.api.layer1.simplified.*;
+import java.awt.*;
+import java.util.HashMap;
+import java.util.Map;
+
+@Layer1SimpleAttachable
+@Layer1StrategyName("NQ OrderFlow Pro + Visuals")
+@Layer1ApiVersion(Layer1ApiVersionValue.VERSION2)
+public class NqOrderFlowVisuals implements CustomModuleAdapter, DepthDataListener, TradeDataListener {
+
+    private Api api;
+    private Indicator pocIndicator;
+    private Indicator wvapIndicator;
+    private CustomCanvasRenderer canvasRenderer;
+    private final Map<Integer, Double> volumeAtPrice = new HashMap<>();
+    private int pocPrice = 0;
+    private double maxVolume = 0;
+    private double cumulativeVolumePrice = 0;
+    private double cumulativeVolume = 0;
+    private double wvap = 0;
+    private double bidVolume = 0;
+    private double askVolume = 0;
+
+    @Override
+    public void initialize(String alias, InstrumentInfo info, Api api, InitialState initialState) {
+        this.api = api;
+        
+        pocIndicator = api.registerIndicator("POC", GraphType.PRIMARY);
+        pocIndicator.setColor(Color.RED);
+        
+        wvapIndicator = api.registerIndicator("WVAP", GraphType.PRIMARY);
+        wvapIndicator.setColor(Color.GREEN);
+        
+        canvasRenderer = api.registerCanvasRenderer("NQ Signals");
+    }
+
+    private void updateWvapAndPoc(double price, int size) {
+        cumulativeVolumePrice += price * size;
+        cumulativeVolume += size;
+        wvap = cumulativeVolumePrice / cumulativeVolume;
+        wvapIndicator.addPoint(wvap);
+
+        double currentVolume = volumeAtPrice.getOrDefault((int) price, 0.0) + size;
+        volumeAtPrice.put((int) price, currentVolume);
+        if (currentVolume > maxVolume) {
+            maxVolume = currentVolume;
+            pocPrice = (int) price;
+            pocIndicator.addPoint(pocPrice);
+        }
+    }
+
+    private void checkTradingSignals(double price, int size) {
+        double imbalanceRatio = (bidVolume - askVolume) / (bidVolume + askVolume + 1e-10);
+        boolean isBullishWVAP = price > wvap;
+        boolean isNearPOC = Math.abs(price - pocPrice) <= 5;
+
+        if (isNearPOC) {
+            if (imbalanceRatio > 0.7 && !isBullishWVAP) {
+                drawSignal(price, "SHORT", Color.RED);
+            } else if (imbalanceRatio < -0.7 && isBullishWVAP) {
+                drawSignal(price, "LONG", Color.GREEN);
+            }
+        }
+
+        if (Math.abs(imbalanceRatio) > 0.7 && size > 500) {
+            canvasRenderer.addHighlight(price - 10, price + 10, Color.YELLOW);
+        }
+    }
+
+    private void drawSignal(double price, String signalType, Color color) {
+        canvasRenderer.addText(price, signalType.equals("LONG") ? "↑" : "↓", color, 12);
+        canvasRenderer.addHorizontalLine(price, color, 1.5f);
+        api.showToast(signalType + " @ " + price);
+        api.playSound("alert.wav");
+    }
+
+    @Override
+    public void onTrade(double price, int size, TradeInfo tradeInfo) {
+        updateWvapAndPoc(price, size);
+        checkTradingSignals(price, size);
+    }
+
+    @Override
+    public void onDepth(boolean isBid, int price, int size) {
+        if (isBid) bidVolume += size;
+        else askVolume += size;
+    }
+
+    @Override
+    public void stop() {
+        // Cleanup
+    }
+}
